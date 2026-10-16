@@ -16,9 +16,9 @@ jobs:
     - name: Setup MSBuild / CMake
       uses: microsoft/setup-msbuild@v2
 
-    - name: Configure & Build (Release x64)
+    - name: Configure & Build (Release Win32)
       run: |
-        cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+        cmake -B build -A Win32 -DCMAKE_BUILD_TYPE=Release
         cmake --build build --config Release
 
     - name: Upload fertige DLL als Download

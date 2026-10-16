@@ -136,7 +136,7 @@ HRESULT WINAPI D3DX11CreateShaderResourceViewFromFileA(
 		addr_D3DX11CreateShaderResourceViewFromFileA = (D3DX11CSRVFFA)GetProcAddress(hTrueDX11_43Module, "D3DX11CreateShaderResourceViewFromFileA");
 	}
 
-	if (pdaOptions.pda.enabled == true && false == gdi_hooked) {
+	if (!gdi_hooked) {
 		HookGDIFunctions();
 		gdi_hooked = true;
 	}

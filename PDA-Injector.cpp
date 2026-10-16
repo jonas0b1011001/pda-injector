@@ -1,298 +1,315 @@
 /*
-Condor 2 PDA Injector
-Copyright(C) 2024 Piotr Gertz
-
-This program is free software; you can redistribute it and /or
-modify it under the terms of the GNU Lesser General Public
-License as published by the Free Software Foundation; either
-version 3 of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.See the GNU
-Lesser General Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public License
-along with this program; if not, write to the Free Software Foundation,
-Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110 - 1301, USA.
+Condor 3 PDA Injector - Checklist Display Module
+Copyright (C) 2024 Piotr Gertz, 2026 Refactored Edition
 */
 
-
 #include "PDA-Injector.h"
-#include "resource.h"
-#include "mouse.h"
 
-#include <algorithm>
-#include <array>
-#include <vector>
-#include <chrono>
-
-#include <windowsx.h>
-
-#include "fmt/format.h"
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <gdiplus.h>
 
 #ifdef min
 #undef min
 #endif
+#ifdef max
+#undef max
+#endif
+
+#include <algorithm>
+#include <vector>
+#include <string>
+
+#pragma comment(lib, "gdiplus.lib")
 
 extern PDAInjectorOptions pdaOptions;
 
-std::vector<uint8_t> pixel_buffer;
+// GDI+ Lifecycle
+static ULONG_PTR g_gdiplusToken = 0;
+static bool g_gdiplusInitialized = false;
 
-BOOL LoadSettings(PDAInjectorOptions& settings, std::string ini_path);
-
-void SwapRedAndBlue(HDC hDC, HBITMAP hBitmap)
-{
-    constexpr auto bytesPerRow = XC_WIDTH  * 4;
-    constexpr auto bufferSize = bytesPerRow * XC_HEIGHT;
-
-    if (pixel_buffer.size() != bufferSize) {
-        pixel_buffer = std::move(std::vector<uint8_t>(bufferSize));
-    }
-
-    BYTE* pBits = pixel_buffer.data();
-
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = XC_WIDTH;
-    bmi.bmiHeader.biHeight = -XC_HEIGHT;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    if (GetDIBits(hDC, hBitmap, 0, XC_HEIGHT, pBits, &bmi, DIB_RGB_COLORS) == 0) {
-        return;
-    }
-
-    for (int row = 0; row < XC_HEIGHT; row++) {
-        auto* row_bytes = &pBits[bytesPerRow * row];
-        for (int x = 0; x < XC_WIDTH; x++) {
-            std::swap(row_bytes[x * 4], row_bytes[x * 4 + 2]);
+static void EnsureGdiPlus() {
+    if (!g_gdiplusInitialized) {
+        Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+        if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL) == Gdiplus::Ok) {
+            g_gdiplusInitialized = true;
         }
     }
-
-    SetDIBits(hDC, hBitmap, 0, XC_HEIGHT, pBits, &bmi, DIB_RGB_COLORS);
 }
 
-POINT appMousePos = { 0,0 };
-time_t appLastMouseMove = 0;
-bool appMouseButtonDown = false;
+// Prepared Checklist Buffer State
+static HDC g_hChecklistDC = NULL;
+static HBITMAP g_hChecklistDIB = NULL;
+static HGDIOBJ g_hOldBitmap = NULL;
+static void* g_pDIBBits = nullptr;
+static int g_cachedWidth = 0;
+static int g_cachedHeight = 0;
+static std::string g_cachedImagePath = "";
+static bool g_checklistReady = false;
 
-BOOL CopyXCSoarToPDA(HWND hWnd, HDC srcDC, HDC dstDC) {
+// Scratch buffer for Condor original PDA resize
+static HDC g_hScratchDC = NULL;
+static HBITMAP g_hScratchBMP = NULL;
+static HGDIOBJ g_hOldScratchBMP = NULL;
+static int g_scratchW = 0;
+static int g_scratchH = 0;
 
-    extern HBITMAP captureBMP;
-
-    HDC hTempDC = CreateCompatibleDC(dstDC);
-    SelectObject(hTempDC, captureBMP);
-
-    RECT rect;
-    GetClientRect(hWnd, &rect);
-    const long width = rect.right - rect.left;
-    const long height = rect.bottom - rect.top;
-
-    BitBlt(hTempDC, 0, 0, width, height, srcDC, 0, 0, SRCCOPY);
-
-    if ((pdaOptions.app.pass_mouse || pdaOptions.joystick.mouse_enabled) &&
-        (time(nullptr) - appLastMouseMove) < 15) {
-
-        auto brush = CreateSolidBrush(appMouseButtonDown ? RGB(0,0, 255) : RGB(255, 0, 0));
-        SelectObject(hTempDC, brush);
-        Ellipse(hTempDC, appMousePos.x - 6, appMousePos.y - 6, appMousePos.x + 6, appMousePos.y + 6);
-        GdiFlush();
-        DeleteObject(brush);
+void CleanupChecklist() {
+    if (g_hChecklistDC) {
+        if (g_hOldBitmap) {
+            SelectObject(g_hChecklistDC, g_hOldBitmap);
+            g_hOldBitmap = NULL;
+        }
+        DeleteDC(g_hChecklistDC);
+        g_hChecklistDC = NULL;
     }
 
-    if (pdaOptions.pda.swap_colours) {
-        SwapRedAndBlue(hTempDC, captureBMP);
+    if (g_hChecklistDIB) {
+        DeleteObject(g_hChecklistDIB);
+        g_hChecklistDIB = NULL;
+        g_pDIBBits = nullptr;
     }
 
-    const auto result = StretchBlt(dstDC, 0, 0, XC_WIDTH, XC_HEIGHT, hTempDC, 0, 0, width, height, SRCCOPY);
-
-    if (width != XC_WIDTH || height != XC_HEIGHT) {
-        GetWindowRect(hWnd, &rect);
-        MoveWindow(hWnd, rect.left, rect.top,
-            (XC_WIDTH)+(rect.right - rect.left - width),
-            (XC_HEIGHT)+(rect.bottom - rect.top - height), TRUE);
+    if (g_hScratchDC) {
+        if (g_hOldScratchBMP) {
+            SelectObject(g_hScratchDC, g_hOldScratchBMP);
+            g_hOldScratchBMP = NULL;
+        }
+        DeleteDC(g_hScratchDC);
+        g_hScratchDC = NULL;
     }
 
-    DeleteDC(hTempDC);
+    if (g_hScratchBMP) {
+        DeleteObject(g_hScratchBMP);
+        g_hScratchBMP = NULL;
+    }
 
-    return result;
+    g_cachedWidth = 0;
+    g_cachedHeight = 0;
+    g_cachedImagePath = "";
+    g_checklistReady = false;
+    g_scratchW = 0;
+    g_scratchH = 0;
+
+    if (g_gdiplusInitialized) {
+        Gdiplus::GdiplusShutdown(g_gdiplusToken);
+        g_gdiplusInitialized = false;
+        g_gdiplusToken = 0;
+    }
 }
 
-bool ResizeOriginalPDA(HDC hDC)
-{
-    extern HBITMAP backgroundBMP;
+static std::string ResolveImagePath(const std::string& path) {
+    if (path.empty()) {
+        return "";
+    }
+    // Check if path is absolute
+    if (path.find(':') != std::string::npos || path.rfind("\\\\", 0) == 0) {
+        return path;
+    }
+    std::string modDir = GetModuleDirectory();
+    if (!modDir.empty()) {
+        return modDir + path;
+    }
+    return path;
+}
 
-    HDC hdcMem = CreateCompatibleDC(hDC);
-    SelectObject(hdcMem, backgroundBMP);
-    BitBlt(hdcMem, 0, 0, XC_WIDTH / 2, XC_HEIGHT / 2, hDC, 0, 0, SRCCOPY);
-    StretchBlt(hDC, 0, 0, XC_WIDTH, XC_HEIGHT, hdcMem, 0, 0, XC_WIDTH / 2, XC_HEIGHT / 2, SRCCOPY);
-    DeleteDC(hdcMem);
+static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeight) {
+    std::string fullImagePath = ResolveImagePath(pdaOptions.checklist.image);
 
+    // If already loaded for current resolution and path, nothing to do
+    if (g_checklistReady &&
+        g_cachedWidth == targetWidth &&
+        g_cachedHeight == targetHeight &&
+        g_cachedImagePath == fullImagePath) {
+        return true;
+    }
+
+    EnsureGdiPlus();
+    if (!g_gdiplusInitialized) {
+        return false;
+    }
+
+    // Recreate DIBSection if resolution changed
+    if (g_cachedWidth != targetWidth || g_cachedHeight != targetHeight || !g_hChecklistDC) {
+        if (g_hChecklistDC) {
+            if (g_hOldBitmap) {
+                SelectObject(g_hChecklistDC, g_hOldBitmap);
+                g_hOldBitmap = NULL;
+            }
+            DeleteDC(g_hChecklistDC);
+            g_hChecklistDC = NULL;
+        }
+        if (g_hChecklistDIB) {
+            DeleteObject(g_hChecklistDIB);
+            g_hChecklistDIB = NULL;
+            g_pDIBBits = nullptr;
+        }
+
+        g_hChecklistDC = CreateCompatibleDC(hTargetDC);
+        if (!g_hChecklistDC) {
+            return false;
+        }
+
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = targetWidth;
+        bmi.bmiHeader.biHeight = -targetHeight; // top-down DIB
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        g_hChecklistDIB = CreateDIBSection(hTargetDC, &bmi, DIB_RGB_COLORS, &g_pDIBBits, NULL, 0);
+        if (!g_hChecklistDIB || !g_pDIBBits) {
+            return false;
+        }
+
+        g_hOldBitmap = SelectObject(g_hChecklistDC, g_hChecklistDIB);
+        g_cachedWidth = targetWidth;
+        g_cachedHeight = targetHeight;
+    }
+
+    g_cachedImagePath = fullImagePath;
+    g_checklistReady = false;
+
+    // Convert image path to UTF-16 for GDI+
+    int wlen = MultiByteToWideChar(CP_ACP, 0, fullImagePath.c_str(), -1, NULL, 0);
+    std::wstring widePath(wlen, 0);
+    MultiByteToWideChar(CP_ACP, 0, fullImagePath.c_str(), -1, &widePath[0], wlen);
+
+    Gdiplus::Bitmap srcBitmap(widePath.c_str());
+    if (srcBitmap.GetLastStatus() != Gdiplus::Ok) {
+        // Fallback: draw error message into memory DC
+        RECT rc = { 0, 0, targetWidth, targetHeight };
+        HBRUSH blackBrush = CreateSolidBrush(RGB(0, 0, 0));
+        FillRect(g_hChecklistDC, &rc, blackBrush);
+        DeleteObject(blackBrush);
+
+        SetTextColor(g_hChecklistDC, RGB(255, 50, 50));
+        SetBkMode(g_hChecklistDC, TRANSPARENT);
+        std::string msg = "Checklist image not found:\n" + fullImagePath + "\n\nPress F10 for Condor PDA";
+        DrawTextA(g_hChecklistDC, msg.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+        g_checklistReady = true;
+        return true;
+    }
+
+    UINT srcW = srcBitmap.GetWidth();
+    UINT srcH = srcBitmap.GetHeight();
+    if (srcW == 0 || srcH == 0) {
+        return false;
+    }
+
+    // High quality bicubic scaling with aspect-ratio preservation (Fit / Letterbox)
+    float scale = std::min(static_cast<float>(targetWidth) / static_cast<float>(srcW),
+                           static_cast<float>(targetHeight) / static_cast<float>(srcH));
+    int dstW = static_cast<int>(srcW * scale);
+    int dstH = static_cast<int>(srcH * scale);
+    int dstX = (targetWidth - dstW) / 2;
+    int dstY = (targetHeight - dstH) / 2;
+
+    {
+        Gdiplus::Graphics g(g_hChecklistDC);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+
+        // Fill background with black for letterbox margins
+        g.Clear(Gdiplus::Color(255, 0, 0, 0));
+        g.DrawImage(&srcBitmap, dstX, dstY, dstW, dstH);
+    }
+
+    g_checklistReady = true;
     return true;
 }
 
-static HHOOK hMouseHook;
-static HWND hXCSoarWnd = NULL;
-static HINSTANCE hXCSoarInstance = NULL;
-static HWND hCondorWnd = NULL;
-static WNDPROC condorWndProc = NULL;
-static bool condorWindowActive = true;
+static void ResizeOriginalPDA(HDC hDC, int width, int height) {
+    int halfW = width / 2;
+    int halfH = height / 2;
 
-static std::chrono::steady_clock::time_point last_mouse_input;
-
-LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    static POINT prevPos = { 0,0 };
-    static auto prevClick = std::chrono::steady_clock::time_point();
-
-    const auto now = std::chrono::steady_clock::now();
-    last_mouse_input = now;
-
-    if (nCode >= 0 && condorWindowActive == true) {
-
-        appLastMouseMove = time(nullptr);
-
-        MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
-        if (pMouseStruct != nullptr) {
-
-            const auto dx = pMouseStruct->pt.x - prevPos.x;
-            const auto dy = pMouseStruct->pt.y - prevPos.y;
-
-            appMousePos.x = std::clamp(appMousePos.x + dx, 0l, XC_WIDTH);
-            appMousePos.y = std::clamp(appMousePos.y + dy, 0l, XC_HEIGHT);
-
-            prevPos = { pMouseStruct->pt.x , pMouseStruct->pt.y };
-        }
-
-        if (wParam == WM_RBUTTONDOWN) {
-            appMouseButtonDown = true;
-            SendMouseToBestTarget(hXCSoarWnd, appMousePos, WM_LBUTTONDOWN, 0);
-        }
-        else if (wParam == WM_RBUTTONUP) {
-            appMouseButtonDown = false;
-            SendMouseToBestTarget(hXCSoarWnd, appMousePos, WM_LBUTTONUP, 0);
-
-            if (now - prevClick < std::chrono::milliseconds(300)) {
-                SendMouseToBestTarget(hXCSoarWnd, appMousePos, WM_LBUTTONDBLCLK, 0);
+    if (!g_hScratchDC || g_scratchW != halfW || g_scratchH != halfH) {
+        if (g_hScratchDC) {
+            if (g_hOldScratchBMP) {
+                SelectObject(g_hScratchDC, g_hOldScratchBMP);
+                g_hOldScratchBMP = NULL;
             }
-            prevClick = now;
+            DeleteDC(g_hScratchDC);
+            g_hScratchDC = NULL;
         }
-        else if (wParam == WM_MOUSEMOVE && appMouseButtonDown == true) {
-            SendMouseToBestTarget(hXCSoarWnd, appMousePos, WM_MOUSEMOVE, appMouseButtonDown ? MK_LBUTTON : 0);
+        if (g_hScratchBMP) {
+            DeleteObject(g_hScratchBMP);
+            g_hScratchBMP = NULL;
         }
-        else if (wParam == WM_MOUSEWHEEL) {
-            PostMessage(hXCSoarWnd, WM_MOUSEWHEEL, wParam, MAKELPARAM(appMousePos.x, appMousePos.y));
-        }
+
+        g_hScratchDC = CreateCompatibleDC(hDC);
+        g_hScratchBMP = CreateCompatibleBitmap(hDC, halfW, halfH);
+        g_hOldScratchBMP = SelectObject(g_hScratchDC, g_hScratchBMP);
+        g_scratchW = halfW;
+        g_scratchH = halfH;
     }
 
-    return CallNextHookEx(hMouseHook, nCode, wParam, lParam);
+    BitBlt(g_hScratchDC, 0, 0, halfW, halfH, hDC, 0, 0, SRCCOPY);
+    StretchBlt(hDC, 0, 0, width, height, g_hScratchDC, 0, 0, halfW, halfH, SRCCOPY);
 }
 
-LRESULT CALLBACK CaptureWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-
-    if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && hXCSoarWnd != NULL)
-    {
-        const uint8_t key = static_cast<uint8_t>(wParam);
-        if (pdaOptions.app.pass_keys[key] != 0 || ((pdaOptions.app.pass_all_with_shift && (GetKeyState(VK_SHIFT) & 0x8000) != 0) && (key != VK_SHIFT))) {
-            const WPARAM mappedKey = static_cast<WPARAM>(pdaOptions.app.pass_keys[key]);
-            if (msg == WM_KEYDOWN) {
-                PostMessage(hXCSoarWnd, WM_ACTIVATE, WA_ACTIVE, 0);
-            }
-            PostMessageA(hXCSoarWnd, msg, mappedKey, lParam);
-            return 1;
-        }
-    }
-    else if (msg == WM_SYSKEYUP && static_cast<uint8_t>(wParam) == VK_F10) {
-        pdaOptions.pda.enabled = !pdaOptions.pda.enabled;
-    }
-    else if (msg == WM_ACTIVATE) {
-        condorWindowActive = (wParam != WA_INACTIVE);
-    }
-    else if (msg == WM_DESTROY)
-    {
-        const auto result = CallWindowProc(condorWndProc, hWnd, msg, wParam, lParam);
-        SetWindowLong(hWnd, GWL_WNDPROC, (LONG)(condorWndProc));
-        condorWndProc = NULL;
-
-        if (pdaOptions.app.pass_mouse) {
-            UnhookWindowsHookEx(hMouseHook);
-        }
-
-        hCondorWnd = NULL;
-        return result;
-    }
-
-    return CallWindowProc(condorWndProc, hWnd, msg, wParam, lParam);
-}
-
-bool PDAInject(HDC hPdaDC, int page)
-{
+bool PDAInject(HDC hPdaDC, int page) {
     if (hPdaDC == NULL) {
         return false;
     }
 
-    if (pdaOptions.app.pass_input && condorWndProc == NULL) {
-        hCondorWnd = FindWindowA(NULL, "Condor version 3.1.0");
-        if (hCondorWnd != NULL) {
-            condorWndProc = reinterpret_cast<WNDPROC>(GetWindowLong(hCondorWnd, GWL_WNDPROC));
-            if (condorWndProc != NULL) {
-                SetWindowLong(hCondorWnd, GWL_WNDPROC, reinterpret_cast<LONG>(CaptureWndProc));
-                LoadSettings(pdaOptions, "pda.ini");
+    // State management and hotkey edge detection
+    static bool s_wasKeyDown = false;
+    static bool s_initializedState = false;
+    static bool g_showChecklist = true;
+
+    if (!s_initializedState) {
+        g_showChecklist = pdaOptions.checklist.show_on_start;
+        s_initializedState = true;
+    }
+
+    const int toggleKey = pdaOptions.checklist.toggle_key;
+    if (toggleKey > 0) {
+        bool isKeyDown = (GetAsyncKeyState(toggleKey) & 0x8000) != 0;
+        if (isKeyDown && !s_wasKeyDown) {
+            g_showChecklist = !g_showChecklist;
+        }
+        s_wasKeyDown = isKeyDown;
+    }
+
+    // Determine target dimensions from hPdaDC bitmap
+    int pdaWidth = PDA_DEFAULT_WIDTH;
+    int pdaHeight = PDA_DEFAULT_HEIGHT;
+
+    HBITMAP hTargetBmp = static_cast<HBITMAP>(GetCurrentObject(hPdaDC, OBJ_BITMAP));
+    if (hTargetBmp) {
+        BITMAP bm = {};
+        if (GetObject(hTargetBmp, sizeof(BITMAP), &bm) > 0) {
+            if (bm.bmWidth > 0 && bm.bmHeight > 0) {
+                pdaWidth = bm.bmWidth;
+                pdaHeight = bm.bmHeight;
             }
         }
     }
 
-    const auto now = std::chrono::steady_clock::now();
-    const auto since_last_mouse_input = now - last_mouse_input;
-
-    if (pdaOptions.app.pass_mouse && since_last_mouse_input >= std::chrono::seconds(30)) {
-        if (hMouseHook != NULL) {
-            UnhookWindowsHookEx(hMouseHook);
-        }
-        hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseProc, NULL, 0);
-        last_mouse_input = now;
-    }
-
-    if (pdaOptions.pda.enabled)
-    {
-        if (hXCSoarWnd == NULL) {
-            hXCSoarWnd = FindWindowA(NULL, pdaOptions.app.window.c_str());
-            if (hXCSoarWnd != NULL) {
-                hXCSoarInstance = (HINSTANCE)GetWindowLong(hXCSoarWnd, GWL_HINSTANCE);
+    if (g_showChecklist) {
+        if (UpdateChecklistBuffer(hPdaDC, pdaWidth, pdaHeight) && g_checklistReady) {
+            // Check if destination bitmap has accessible direct pixel memory (DIBSection)
+            DIBSECTION ds = {};
+            if (hTargetBmp &&
+                GetObject(hTargetBmp, sizeof(DIBSECTION), &ds) == sizeof(DIBSECTION) &&
+                ds.dsBm.bmBits != nullptr &&
+                ds.dsBmih.biBitCount == 32 &&
+                g_pDIBBits != nullptr) {
+                // High performance direct memory copy
+                memcpy(ds.dsBm.bmBits, g_pDIBBits, pdaWidth * pdaHeight * 4);
+            } else if (g_hChecklistDC) {
+                // Fast driver-accelerated GDI memory blit
+                BitBlt(hPdaDC, 0, 0, pdaWidth, pdaHeight, g_hChecklistDC, 0, 0, SRCCOPY);
             }
-        }
-
-        if (hXCSoarWnd != NULL) {
-            if (hXCSoarInstance != (HINSTANCE)GetWindowLong(hXCSoarWnd, GWL_HINSTANCE)) {
-                hXCSoarWnd = NULL;
-                return true;
-            }
-
-            HDC hXCSoarDC = GetDC(hXCSoarWnd);
-            if (!hXCSoarDC) {
-                hXCSoarWnd = NULL;
-                return true;
-            }
-
-            CopyXCSoarToPDA(hXCSoarWnd, hXCSoarDC, hPdaDC);
-            ReleaseDC(hXCSoarWnd, hXCSoarDC);
-            return true;
-        }
-        else if (pdaOptions.pda.show_waiting_screen == true)
-        {
-            extern HBITMAP waitingForXCSoarBMP;
-
-            HDC hdcMem = CreateCompatibleDC(hPdaDC);
-            SelectObject(hdcMem, waitingForXCSoarBMP);
-            BitBlt(hPdaDC, 0, 0, XC_WIDTH, XC_HEIGHT, hdcMem, 0, 0, SRCCOPY);
-            DeleteDC(hdcMem);
             return true;
         }
     }
 
+    // When checklist is inactive, stretch original Condor PDA render to fill doubled texture
     GdiFlush();
-    ResizeOriginalPDA(hPdaDC);
+    ResizeOriginalPDA(hPdaDC, pdaWidth, pdaHeight);
     return true;
 }
