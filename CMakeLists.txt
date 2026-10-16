@@ -34,6 +34,7 @@ target_link_libraries(d3dx11_43 PRIVATE
     gdi32
     user32
     kernel32
+    ole32
 )
 
 set_target_properties(d3dx11_43 PROPERTIES

@@ -7,6 +7,7 @@ Copyright (C) 2024 Piotr Gertz, 2026 Refactored Edition
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>
 #include <gdiplus.h>
 
 #ifdef min
