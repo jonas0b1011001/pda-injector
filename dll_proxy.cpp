@@ -102,24 +102,25 @@ BOOL WINAPI ExtTextOutAOverride(_In_ HDC hdc, _In_ int x, _In_ int y, _In_ UINT 
 }
 
 void HookGDIFunctions() {
-	//(*(DWORD*)(0x007D6540)) = reinterpret_cast<DWORD>(ExtTextOutAOverride); //condor 3.0.0
-	//(*(DWORD*)(0x007CE530)) = reinterpret_cast<DWORD>(ExtTextOutAOverride); //condor 3.0.2, 3.0.3
-	//(*(DWORD*)(0x007D3500)) = reinterpret_cast<DWORD>(ExtTextOutAOverride); //condor 3.0.5
-	//(*(DWORD*)(0x007D7500)) = reinterpret_cast<DWORD>(ExtTextOutAOverride); //condor 3.0.6 - 3.0.8
-	//(*(DWORD*)(0x007DB500)) = reinterpret_cast<DWORD>(ExtTextOutAOverride); //condor 3.0.9
-	(*(DWORD*)(0x007DC4F8)) = reinterpret_cast<DWORD>(ExtTextOutAOverride); //condor 3.1.0
-
 	DWORD oldprotect = 0;
 	auto hProc = GetCurrentProcess();
 
+	// Hook ExtTextOutA (condor 3.1.0) with memory protection safety
+	DWORD* pExtTextOutA = reinterpret_cast<DWORD*>(0x007DC4F8);
+	if (VirtualProtectEx(hProc, pExtTextOutA, sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldprotect)) {
+		*pExtTextOutA = reinterpret_cast<DWORD>(ExtTextOutAOverride);
+		VirtualProtectEx(hProc, pExtTextOutA, sizeof(DWORD), oldprotect, &oldprotect);
+	}
+
 	// double the PDA texture size
 	char* BASE_ADDR = reinterpret_cast<char*>(0x00736C00);
-	VirtualProtectEx(hProc, BASE_ADDR, 0x200, PAGE_EXECUTE_READWRITE, &oldprotect);
-	reinterpret_cast<uint32_t*>(BASE_ADDR + 0x96 + 1)[0] *= 2;
-	reinterpret_cast<uint32_t*>(BASE_ADDR + 0xAA + 1)[0] *= 2;
-	reinterpret_cast<uint32_t*>(BASE_ADDR + 0xB9 + 1)[0] *= 2;
-	reinterpret_cast<uint32_t*>(BASE_ADDR + 0xBE + 1)[0] *= 2;
-	VirtualProtectEx(hProc, BASE_ADDR, 0x200, oldprotect, &oldprotect);
+	if (VirtualProtectEx(hProc, BASE_ADDR, 0x200, PAGE_EXECUTE_READWRITE, &oldprotect)) {
+		reinterpret_cast<uint32_t*>(BASE_ADDR + 0x96 + 1)[0] *= 2;
+		reinterpret_cast<uint32_t*>(BASE_ADDR + 0xAA + 1)[0] *= 2;
+		reinterpret_cast<uint32_t*>(BASE_ADDR + 0xB9 + 1)[0] *= 2;
+		reinterpret_cast<uint32_t*>(BASE_ADDR + 0xBE + 1)[0] *= 2;
+		VirtualProtectEx(hProc, BASE_ADDR, 0x200, oldprotect, &oldprotect);
+	}
 }
 
 HRESULT WINAPI D3DX11CreateShaderResourceViewFromFileA(

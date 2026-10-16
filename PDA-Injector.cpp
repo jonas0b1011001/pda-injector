@@ -172,23 +172,43 @@ static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeig
     g_cachedImagePath = fullImagePath;
     g_checklistReady = false;
 
-    // Convert image path to UTF-16 for GDI+
-    int wlen = MultiByteToWideChar(CP_ACP, 0, fullImagePath.c_str(), -1, NULL, 0);
-    std::wstring widePath(wlen, 0);
-    MultiByteToWideChar(CP_ACP, 0, fullImagePath.c_str(), -1, &widePath[0], wlen);
+    // Convert image path to UTF-16 for GDI+ (supports UTF-8 or ANSI paths)
+    std::wstring widePath;
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, fullImagePath.c_str(), -1, NULL, 0);
+    if (wlen > 1) {
+        std::vector<wchar_t> wbuf(wlen);
+        MultiByteToWideChar(CP_UTF8, 0, fullImagePath.c_str(), -1, wbuf.data(), wlen);
+        widePath = wbuf.data();
+    } else {
+        wlen = MultiByteToWideChar(CP_ACP, 0, fullImagePath.c_str(), -1, NULL, 0);
+        if (wlen > 0) {
+            std::vector<wchar_t> wbuf(wlen);
+            MultiByteToWideChar(CP_ACP, 0, fullImagePath.c_str(), -1, wbuf.data(), wlen);
+            widePath = wbuf.data();
+        }
+    }
 
     Gdiplus::Bitmap srcBitmap(widePath.c_str());
     if (srcBitmap.GetLastStatus() != Gdiplus::Ok) {
-        // Fallback: draw error message into memory DC
-        RECT rc = { 0, 0, targetWidth, targetHeight };
+        // Fallback: draw readable error message into memory DC
+        RECT rc = { 20, 20, targetWidth - 20, targetHeight - 20 };
+        RECT rcFull = { 0, 0, targetWidth, targetHeight };
         HBRUSH blackBrush = CreateSolidBrush(RGB(0, 0, 0));
-        FillRect(g_hChecklistDC, &rc, blackBrush);
+        FillRect(g_hChecklistDC, &rcFull, blackBrush);
         DeleteObject(blackBrush);
 
-        SetTextColor(g_hChecklistDC, RGB(255, 50, 50));
+        SetTextColor(g_hChecklistDC, RGB(255, 60, 60));
         SetBkMode(g_hChecklistDC, TRANSPARENT);
-        std::string msg = "Checklist image not found:\n" + fullImagePath + "\n\nPress F10 for Condor PDA";
+        HFONT hFont = CreateFontA(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
+        HGDIOBJ oldFont = SelectObject(g_hChecklistDC, hFont);
+
+        std::string msg = "Checklist image not found:\n\n" + fullImagePath + "\n\nPress F10 for original Condor PDA";
         DrawTextA(g_hChecklistDC, msg.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+
+        SelectObject(g_hChecklistDC, oldFont);
+        DeleteObject(hFont);
         g_checklistReady = true;
         return true;
     }
@@ -266,13 +286,21 @@ bool PDAInject(HDC hPdaDC, int page) {
         s_initializedState = true;
     }
 
-    const int toggleKey = pdaOptions.checklist.toggle_key;
-    if (toggleKey > 0) {
-        bool isKeyDown = (GetAsyncKeyState(toggleKey) & 0x8000) != 0;
-        if (isKeyDown && !s_wasKeyDown) {
-            g_showChecklist = !g_showChecklist;
+    HWND hForeground = GetForegroundWindow();
+    DWORD foregroundPid = 0;
+    if (hForeground) {
+        GetWindowThreadProcessId(hForeground, &foregroundPid);
+    }
+
+    if (foregroundPid == GetCurrentProcessId()) {
+        const int toggleKey = pdaOptions.checklist.toggle_key;
+        if (toggleKey > 0) {
+            bool isKeyDown = (GetAsyncKeyState(toggleKey) & 0x8000) != 0;
+            if (isKeyDown && !s_wasKeyDown) {
+                g_showChecklist = !g_showChecklist;
+            }
+            s_wasKeyDown = isKeyDown;
         }
-        s_wasKeyDown = isKeyDown;
     }
 
     // Determine target dimensions from hPdaDC bitmap
@@ -293,16 +321,19 @@ bool PDAInject(HDC hPdaDC, int page) {
     if (g_showChecklist) {
         if (UpdateChecklistBuffer(hPdaDC, pdaWidth, pdaHeight) && g_checklistReady) {
             // Check if destination bitmap has accessible direct pixel memory (DIBSection)
+            // and has identical top-down orientation (biHeight < 0) and stride
             DIBSECTION ds = {};
             if (hTargetBmp &&
                 GetObject(hTargetBmp, sizeof(DIBSECTION), &ds) == sizeof(DIBSECTION) &&
                 ds.dsBm.bmBits != nullptr &&
                 ds.dsBmih.biBitCount == 32 &&
+                ds.dsBmih.biHeight < 0 &&
+                ds.dsBm.bmWidthBytes == (pdaWidth * 4) &&
                 g_pDIBBits != nullptr) {
                 // High performance direct memory copy
                 memcpy(ds.dsBm.bmBits, g_pDIBBits, pdaWidth * pdaHeight * 4);
             } else if (g_hChecklistDC) {
-                // Fast driver-accelerated GDI memory blit
+                // Fast driver-accelerated GDI memory blit (handles orientation and strides automatically)
                 BitBlt(hPdaDC, 0, 0, pdaWidth, pdaHeight, g_hChecklistDC, 0, 0, SRCCOPY);
             }
             return true;
