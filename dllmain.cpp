@@ -63,6 +63,7 @@ BOOL LoadSettings(PDAInjectorOptions& settings, const std::string& ini_path) {
     settings.checklist.toggle_key = reader.GetInteger("checklist", "toggle_key", 121);
     settings.checklist.page_key = reader.GetInteger("checklist", "page_key", 123);
     settings.checklist.show_on_start = reader.GetBoolean("checklist", "show_on_start", true);
+    settings.checklist.swap_colors = reader.GetBoolean("checklist", "swap_colors", true);
     settings.checklist.invert_colors = reader.GetBoolean("checklist", "invert_colors", false);
 
     return TRUE;

@@ -46,6 +46,7 @@ static void* g_pDIBBits = nullptr;
 static int g_cachedWidth = 0;
 static int g_cachedHeight = 0;
 static std::string g_cachedImagePath = "";
+static bool g_cachedSwapColors = false;
 static bool g_cachedInvert = false;
 static bool g_checklistReady = false;
 
@@ -89,6 +90,7 @@ void CleanupChecklist() {
     g_cachedWidth = 0;
     g_cachedHeight = 0;
     g_cachedImagePath = "";
+    g_cachedSwapColors = false;
     g_cachedInvert = false;
     g_checklistReady = false;
     g_scratchW = 0;
@@ -116,14 +118,15 @@ static std::string ResolveImagePath(const std::string& path) {
     return path;
 }
 
-static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeight, const std::string& imagePath, bool invertColors) {
+static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeight, const std::string& imagePath, bool swapColors, bool invertColors) {
     std::string fullImagePath = ResolveImagePath(imagePath);
 
-    // If already loaded for current resolution, path, and invert setting, nothing to do
+    // If already loaded for current resolution, path, and color settings, nothing to do
     if (g_checklistReady &&
         g_cachedWidth == targetWidth &&
         g_cachedHeight == targetHeight &&
         g_cachedImagePath == fullImagePath &&
+        g_cachedSwapColors == swapColors &&
         g_cachedInvert == invertColors) {
         return true;
     }
@@ -239,22 +242,47 @@ static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeig
         // Fill background with black for letterbox margins
         g.Clear(Gdiplus::Color(255, 0, 0, 0));
 
-        if (invertColors) {
-            Gdiplus::ColorMatrix invertMatrix = {
-                -1.0f,  0.0f,  0.0f,  0.0f,  0.0f,
-                 0.0f, -1.0f,  0.0f,  0.0f,  0.0f,
-                 0.0f,  0.0f, -1.0f,  0.0f,  0.0f,
-                 0.0f,  0.0f,  0.0f,  1.0f,  0.0f,
-                 1.0f,  1.0f,  1.0f,  0.0f,  1.0f
-            };
+        bool needMatrix = swapColors || invertColors;
+        if (needMatrix) {
+            Gdiplus::ColorMatrix cm = {};
+            if (swapColors && invertColors) {
+                // Swap R <-> B and Invert (255 - C)
+                cm.m[0][2] = -1.0f;
+                cm.m[1][1] = -1.0f;
+                cm.m[2][0] = -1.0f;
+                cm.m[3][3] =  1.0f;
+                cm.m[4][0] =  1.0f;
+                cm.m[4][1] =  1.0f;
+                cm.m[4][2] =  1.0f;
+                cm.m[4][4] =  1.0f;
+            } else if (swapColors && !invertColors) {
+                // Swap R <-> B (BGR <-> RGB for Condor D3D11 texture)
+                cm.m[0][2] =  1.0f;
+                cm.m[1][1] =  1.0f;
+                cm.m[2][0] =  1.0f;
+                cm.m[3][3] =  1.0f;
+                cm.m[4][4] =  1.0f;
+            } else if (!swapColors && invertColors) {
+                // Invert without channel swap (255 - C)
+                cm.m[0][0] = -1.0f;
+                cm.m[1][1] = -1.0f;
+                cm.m[2][2] = -1.0f;
+                cm.m[3][3] =  1.0f;
+                cm.m[4][0] =  1.0f;
+                cm.m[4][1] =  1.0f;
+                cm.m[4][2] =  1.0f;
+                cm.m[4][4] =  1.0f;
+            }
+
             Gdiplus::ImageAttributes imgAttr;
-            imgAttr.SetColorMatrix(&invertMatrix, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
+            imgAttr.SetColorMatrix(&cm, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
             g.DrawImage(&srcBitmap, Gdiplus::Rect(dstX, dstY, dstW, dstH), 0, 0, srcW, srcH, Gdiplus::UnitPixel, &imgAttr);
         } else {
             g.DrawImage(&srcBitmap, dstX, dstY, dstW, dstH);
         }
     }
 
+    g_cachedSwapColors = swapColors;
     g_cachedInvert = invertColors;
     g_checklistReady = true;
     return true;
@@ -351,9 +379,10 @@ bool PDAInject(HDC hPdaDC, int page) {
     if (g_showChecklist) {
         const auto& images = pdaOptions.checklist.images;
         std::string currentImage = images.empty() ? "checklist.png" : images[s_currentImageIdx % images.size()];
+        bool swap = pdaOptions.checklist.swap_colors;
         bool invert = pdaOptions.checklist.invert_colors;
 
-        if (UpdateChecklistBuffer(hPdaDC, pdaWidth, pdaHeight, currentImage, invert) && g_checklistReady) {
+        if (UpdateChecklistBuffer(hPdaDC, pdaWidth, pdaHeight, currentImage, swap, invert) && g_checklistReady) {
             // Check if destination bitmap has accessible direct pixel memory (DIBSection)
             // and has identical top-down orientation (biHeight < 0) and stride
             DIBSECTION ds = {};

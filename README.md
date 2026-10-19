@@ -20,7 +20,8 @@ image=checklist1.png
 image2=checklist2.png
 toggle_key=121
 page_key=123
-invert_colors=1
+swap_colors=1
+invert_colors=0
 show_on_start=1
 ```
 
@@ -29,7 +30,8 @@ show_on_start=1
 - **`image2`** .. **`image9`**: (Optional) Additional checklist pages. If configured, you can cycle through all pages in-game.
 - **`toggle_key`**: Virtual Keycode for toggling between the checklist and the original PDA (default: `121` for **F10**).
 - **`page_key`**: Virtual Keycode for switching between checklist pages (default: `123` for **F12**).
-- **`invert_colors`**: Set to `1` to invert colors ($255 - C$, e.g. for high-contrast / dark-mode reading in VR or night flights). Set to `0` for original colors.
+- **`swap_colors`**: Set to `1` to swap Red and Blue channels (BGR $\leftrightarrow$ RGB). Corrects Condor 3's DirectX 11 texture channel ordering (default: `1`).
+- **`invert_colors`**: Set to `1` to invert colors ($255 - C$, e.g. for high-contrast / dark-mode reading in VR or night flights). Set to `0` for original colors (default: `0`).
 - **`show_on_start`**: Whether the checklist is active when Condor starts (`1` = yes, `0` = no, starts with standard PDA).
 
 ---
