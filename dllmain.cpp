@@ -36,9 +36,34 @@ BOOL LoadSettings(PDAInjectorOptions& settings, const std::string& ini_path) {
         return FALSE;
     }
 
-    settings.checklist.image = reader.GetString("checklist", "image", "checklist.png");
+    settings.checklist.images.clear();
+
+    // Check image1 or image
+    std::string img1 = reader.GetString("checklist", "image1", "");
+    if (img1.empty()) {
+        img1 = reader.GetString("checklist", "image", "checklist1.png");
+    }
+    if (!img1.empty()) {
+        settings.checklist.images.push_back(img1);
+    }
+
+    // Check image2 through image9
+    for (int i = 2; i <= 9; ++i) {
+        std::string key = "image" + std::to_string(i);
+        std::string img = reader.GetString("checklist", key, "");
+        if (!img.empty()) {
+            settings.checklist.images.push_back(img);
+        }
+    }
+
+    if (settings.checklist.images.empty()) {
+        settings.checklist.images.push_back("checklist.png");
+    }
+
     settings.checklist.toggle_key = reader.GetInteger("checklist", "toggle_key", 121);
+    settings.checklist.page_key = reader.GetInteger("checklist", "page_key", 123);
     settings.checklist.show_on_start = reader.GetBoolean("checklist", "show_on_start", true);
+    settings.checklist.invert_colors = reader.GetBoolean("checklist", "invert_colors", false);
 
     return TRUE;
 }

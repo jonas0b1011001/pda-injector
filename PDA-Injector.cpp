@@ -46,6 +46,7 @@ static void* g_pDIBBits = nullptr;
 static int g_cachedWidth = 0;
 static int g_cachedHeight = 0;
 static std::string g_cachedImagePath = "";
+static bool g_cachedInvert = false;
 static bool g_checklistReady = false;
 
 // Scratch buffer for Condor original PDA resize
@@ -88,6 +89,7 @@ void CleanupChecklist() {
     g_cachedWidth = 0;
     g_cachedHeight = 0;
     g_cachedImagePath = "";
+    g_cachedInvert = false;
     g_checklistReady = false;
     g_scratchW = 0;
     g_scratchH = 0;
@@ -114,14 +116,15 @@ static std::string ResolveImagePath(const std::string& path) {
     return path;
 }
 
-static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeight) {
-    std::string fullImagePath = ResolveImagePath(pdaOptions.checklist.image);
+static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeight, const std::string& imagePath, bool invertColors) {
+    std::string fullImagePath = ResolveImagePath(imagePath);
 
-    // If already loaded for current resolution and path, nothing to do
+    // If already loaded for current resolution, path, and invert setting, nothing to do
     if (g_checklistReady &&
         g_cachedWidth == targetWidth &&
         g_cachedHeight == targetHeight &&
-        g_cachedImagePath == fullImagePath) {
+        g_cachedImagePath == fullImagePath &&
+        g_cachedInvert == invertColors) {
         return true;
     }
 
@@ -235,9 +238,24 @@ static bool UpdateChecklistBuffer(HDC hTargetDC, int targetWidth, int targetHeig
 
         // Fill background with black for letterbox margins
         g.Clear(Gdiplus::Color(255, 0, 0, 0));
-        g.DrawImage(&srcBitmap, dstX, dstY, dstW, dstH);
+
+        if (invertColors) {
+            Gdiplus::ColorMatrix invertMatrix = {
+                -1.0f,  0.0f,  0.0f,  0.0f,  0.0f,
+                 0.0f, -1.0f,  0.0f,  0.0f,  0.0f,
+                 0.0f,  0.0f, -1.0f,  0.0f,  0.0f,
+                 0.0f,  0.0f,  0.0f,  1.0f,  0.0f,
+                 1.0f,  1.0f,  1.0f,  0.0f,  1.0f
+            };
+            Gdiplus::ImageAttributes imgAttr;
+            imgAttr.SetColorMatrix(&invertMatrix, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
+            g.DrawImage(&srcBitmap, Gdiplus::Rect(dstX, dstY, dstW, dstH), 0, 0, srcW, srcH, Gdiplus::UnitPixel, &imgAttr);
+        } else {
+            g.DrawImage(&srcBitmap, dstX, dstY, dstW, dstH);
+        }
     }
 
+    g_cachedInvert = invertColors;
     g_checklistReady = true;
     return true;
 }
@@ -278,8 +296,10 @@ bool PDAInject(HDC hPdaDC, int page) {
 
     // State management and hotkey edge detection
     static bool s_wasKeyDown = false;
+    static bool s_wasPageKeyDown = false;
     static bool s_initializedState = false;
     static bool g_showChecklist = true;
+    static size_t s_currentImageIdx = 0;
 
     if (!s_initializedState) {
         g_showChecklist = pdaOptions.checklist.show_on_start;
@@ -301,6 +321,16 @@ bool PDAInject(HDC hPdaDC, int page) {
             }
             s_wasKeyDown = isKeyDown;
         }
+
+        const int pageKey = pdaOptions.checklist.page_key;
+        const auto& images = pdaOptions.checklist.images;
+        if (pageKey > 0 && images.size() > 1) {
+            bool isPageKeyDown = (GetAsyncKeyState(pageKey) & 0x8000) != 0;
+            if (isPageKeyDown && !s_wasPageKeyDown) {
+                s_currentImageIdx = (s_currentImageIdx + 1) % images.size();
+            }
+            s_wasPageKeyDown = isPageKeyDown;
+        }
     }
 
     // Determine target dimensions from hPdaDC bitmap
@@ -319,7 +349,11 @@ bool PDAInject(HDC hPdaDC, int page) {
     }
 
     if (g_showChecklist) {
-        if (UpdateChecklistBuffer(hPdaDC, pdaWidth, pdaHeight) && g_checklistReady) {
+        const auto& images = pdaOptions.checklist.images;
+        std::string currentImage = images.empty() ? "checklist.png" : images[s_currentImageIdx % images.size()];
+        bool invert = pdaOptions.checklist.invert_colors;
+
+        if (UpdateChecklistBuffer(hPdaDC, pdaWidth, pdaHeight, currentImage, invert) && g_checklistReady) {
             // Check if destination bitmap has accessible direct pixel memory (DIBSection)
             // and has identical top-down orientation (biHeight < 0) and stride
             DIBSECTION ds = {};

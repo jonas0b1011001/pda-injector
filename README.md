@@ -16,14 +16,20 @@ Place `pda.ini` in the Condor 3 installation directory:
 
 ```ini
 [checklist]
-image=checklist.png
+image=checklist1.png
+image2=checklist2.png
 toggle_key=121
+page_key=123
+invert_colors=1
 show_on_start=1
 ```
 
 ### Options:
-- **`image`**: Name or path of the image file (relative to Condor root or absolute). Supports PNG, JPG, BMP.
-- **`toggle_key`**: Virtual Keycode for toggling between the checklist and the original PDA (default: `121` for **F10**). See [Windows Virtual-Key Codes](https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes).
+- **`image`** / **`image1`**: Primary checklist image file (relative to Condor root or absolute). Supports PNG, JPG, BMP.
+- **`image2`** .. **`image9`**: (Optional) Additional checklist pages. If configured, you can cycle through all pages in-game.
+- **`toggle_key`**: Virtual Keycode for toggling between the checklist and the original PDA (default: `121` for **F10**).
+- **`page_key`**: Virtual Keycode for switching between checklist pages (default: `123` for **F12**).
+- **`invert_colors`**: Set to `1` to invert colors ($255 - C$, e.g. for high-contrast / dark-mode reading in VR or night flights). Set to `0` for original colors.
 - **`show_on_start`**: Whether the checklist is active when Condor starts (`1` = yes, `0` = no, starts with standard PDA).
 
 ---
